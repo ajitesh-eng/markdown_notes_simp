@@ -1,0 +1,104 @@
+package com.example
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.Modifier
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.example.data.AppDatabase
+import com.example.data.NoteRepository
+import com.example.ui.screens.NoteDetailScreen
+import com.example.ui.screens.NoteListScreen
+import com.example.ui.screens.SyncScreen
+import com.example.ui.theme.MyApplicationTheme
+import com.example.ui.viewmodel.NotesViewModel
+
+class MainActivity : ComponentActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+
+        // 1. Initialize Room Storage systems
+        val database = AppDatabase.getDatabase(applicationContext)
+        val repository = NoteRepository(database.noteDao())
+
+        // 2. Instantiate state ViewModel using custom factory wrapper
+        val viewModel: NotesViewModel by viewModels {
+            NotesViewModel.Factory(application, repository)
+        }
+
+        setContent {
+            MyApplicationTheme {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    val navController = rememberNavController()
+
+                    NavHost(
+                        navController = navController,
+                        startDestination = "note_list",
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        // notes index screen
+                        composable("note_list") {
+                            // Ensure selection state is cleared whenever we return back to the index
+                            LaunchedEffect(Unit) {
+                                viewModel.selectNoteId(null)
+                            }
+
+                            NoteListScreen(
+                                viewModel = viewModel,
+                                onNavigateToDetail = { id ->
+                                    navController.navigate("note_detail/$id")
+                                },
+                                onNavigateToSync = {
+                                    navController.navigate("sync_hub")
+                                }
+                            )
+                        }
+
+                        // note markdown editor & live preview screen
+                        composable(
+                            route = "note_detail/{noteId}",
+                            arguments = listOf(
+                                navArgument("noteId") { type = NavType.LongType }
+                            )
+                        ) { backStackEntry ->
+                            val noteId = backStackEntry.arguments?.getLong("noteId") ?: -1L
+                            
+                            // Load exact text on initial load of detail route
+                            LaunchedEffect(noteId) {
+                                viewModel.selectNoteId(noteId)
+                            }
+
+                            NoteDetailScreen(
+                                viewModel = viewModel,
+                                onNavigateBack = {
+                                    navController.popBackStack()
+                                }
+                            )
+                        }
+
+                        // cross-device synchronizer suite hub screen
+                        composable("sync_hub") {
+                            SyncScreen(
+                                viewModel = viewModel,
+                                onNavigateBack = {
+                                    navController.popBackStack()
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,94 @@
+package com.example.data
+
+import kotlinx.coroutines.flow.Flow
+import android.util.Log
+
+class NoteRepository(private val noteDao: NoteDao) {
+
+    val activeNotes: Flow<List<Note>> = noteDao.getAllActiveNotes()
+
+    fun getNoteFlowById(id: Long): Flow<Note?> = noteDao.getNoteFlowById(id)
+
+    suspend fun getNoteById(id: Long): Note? = noteDao.getNoteById(id)
+
+    suspend fun insert(note: Note): Long {
+        val noteToSave = note.copy(
+            updatedAt = System.currentTimeMillis(),
+            isSynced = false
+        )
+        return noteDao.insertNote(noteToSave)
+    }
+
+    suspend fun update(note: Note) {
+        val noteToSave = note.copy(
+            updatedAt = System.currentTimeMillis(),
+            isSynced = false
+        )
+        noteDao.insertNote(noteToSave)
+    }
+
+    suspend fun softDelete(id: Long) {
+        noteDao.softDeleteNote(id)
+    }
+
+    suspend fun getFullNotesListForSync(): List<Note> {
+        return noteDao.getAllNotesWithDeleted()
+    }
+
+    /**
+     * Resolves differences between local data and remote data based on updatedAt timestamps.
+     * Returns true if any updates were made locally, indicating a change.
+     */
+    suspend fun syncWithRemoteNotes(remoteNotes: List<Note>): Boolean {
+        var localChangesMade = false
+        for (remote in remoteNotes) {
+            val local = noteDao.getNoteBySyncId(remote.syncId)
+            if (local == null) {
+                // Completely new note from remote! Save it.
+                // We keep remote's ID as 0 so the Room DB auto-generates a new local auto-increment PK,
+                // but we retain the UUID syncId and timestamps!
+                val newLocal = Note(
+                    title = remote.title,
+                    content = remote.content,
+                    createdAt = remote.createdAt,
+                    updatedAt = remote.updatedAt,
+                    syncId = remote.syncId,
+                    isDeleted = remote.isDeleted,
+                    isSynced = true
+                )
+                noteDao.insertNote(newLocal)
+                localChangesMade = true
+                Log.d("Sync", "Created new local note with syncId: ${remote.syncId}")
+            } else {
+                // Note exists locally. Check which one is newer.
+                if (remote.updatedAt > local.updatedAt) {
+                    // Remote note is newer! Update local copy.
+                    val updatedLocal = local.copy(
+                        title = remote.title,
+                        content = remote.content,
+                        createdAt = remote.createdAt, // Just in case
+                        updatedAt = remote.updatedAt,
+                        isDeleted = remote.isDeleted,
+                        isSynced = true
+                    )
+                    noteDao.insertNote(updatedLocal)
+                    localChangesMade = true
+                    Log.d("Sync", "Updated local note with newer remote state: ${remote.syncId}")
+                } else if (remote.updatedAt < local.updatedAt) {
+                    // Local note is newer. We do not update local, but we mark it as unsynced
+                    // so next sync pushes it back to the outer nodes.
+                    if (local.isSynced) {
+                        noteDao.insertNote(local.copy(isSynced = false))
+                    }
+                    Log.d("Sync", "Local note is newer. Will keep local and queue for push: ${remote.syncId}")
+                } else {
+                    // Timestamps match. Mark as synced.
+                    if (!local.isSynced) {
+                        noteDao.insertNote(local.copy(isSynced = true))
+                    }
+                }
+            }
+        }
+        return localChangesMade
+    }
+}

@@ -1,0 +1,76 @@
+package com.example.sync
+
+import android.util.Log
+import com.example.data.Note
+import com.example.data.NoteRepository
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.Types
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.concurrent.TimeUnit
+
+class SyncClient(private val repository: NoteRepository) {
+
+    private val moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
+    private val noteListType = Types.newParameterizedType(List::class.java, Note::class.java)
+    private val jsonAdapter = moshi.adapter<List<Note>>(noteListType)
+
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
+        .build()
+
+    suspend fun syncWithRemoteServer(targetIp: String, port: Int = 9090): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            // 1. Get current local state (including deleted notes so deletion syncs properly)
+            val localNotes = repository.getFullNotesListForSync()
+            val requestBodyJson = jsonAdapter.toJson(localNotes)
+
+            // 2. Build HTTP request
+            val cleanIp = targetIp.trim().replace("http://", "").replace("/", "")
+            val url = "http://$cleanIp:$port/api/sync"
+            Log.d("SyncClient", "Starting P2P Sync exchange with: $url")
+
+            val mediaType = "application/json; charset=utf-8".toMediaType()
+            val body = requestBodyJson.toRequestBody(mediaType)
+            val request = Request.Builder()
+                .url(url)
+                .post(body)
+                .build()
+
+            // 3. Execute request
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(Exception("Sync server returned error: ${response.code}"))
+                }
+
+                val responseBody = response.body?.string()
+                    ?: return@withContext Result.failure(Exception("Empty body received from partner device"))
+
+                // 4. Parse remote notes received
+                val incomingNotes = jsonAdapter.fromJson(responseBody)
+                    ?: return@withContext Result.failure(Exception("Could not parse sync response payload"))
+
+                // 5. Run local merge with incoming response
+                val mergedAndSaved = repository.syncWithRemoteNotes(incomingNotes)
+                
+                val statusMessage = if (mergedAndSaved) {
+                    "Sync Successful. Synchronized changes with remote notebook."
+                } else {
+                    "Sync Successful. Notes are already up-to-date."
+                }
+
+                return@withContext Result.success(statusMessage)
+            }
+        } catch (e: Exception) {
+            Log.e("SyncClient", "Sync operation failed", e)
+            return@withContext Result.failure(e)
+        }
+    }
+}
